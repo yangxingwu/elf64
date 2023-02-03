@@ -77,6 +77,12 @@ typedef struct object {
 
     // .text section
     uint8_t *text;
+
+    // .data section
+    uint8_t *data;
+
+    // .rodata section
+    uint8_t *rodata;
 } object;
 
 object load_obj(const char *obj_file_path);

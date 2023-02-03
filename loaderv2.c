@@ -57,9 +57,14 @@ static uint8_t *get_section_runtime_base(const object *obj,
     const char *section_name = obj->shstrtab + section_hdr->sh_name;
     size_t section_name_len = strlen(section_name);
 
-    // we only mmap .text section so far
     if (strlen(".text") == section_name_len && !strcmp(".text", section_name))
         return obj->text;
+
+    if (strlen(".data") == section_name_len && !strcmp(".data", section_name))
+        return obj->data;
+
+    if (strlen(".rodata") == section_name_len && !strcmp(".rodata", section_name))
+        return obj->rodata;
 
     fprintf(stderr, "No runtime base address for section %s\n", section_name);
 
@@ -138,6 +143,8 @@ static void do_text_relocations(object *obj)
 
         switch (rela_type)
         {
+        case R_X86_64_PC32:
+            /* S + A - P, 32 bit output, S == L here */
         case R_X86_64_PLT32:
             /* L + A - P, 32 bit output */
             *((uint32_t *)rela_offset) = sym_address + relocation->r_addend - rela_offset;
@@ -156,7 +163,12 @@ void parse_obj(object *obj) {
     const uint8_t *base = obj->hdr.base;
     const Elf64_Ehdr *elf64_hdr = obj->hdr.elf64_hdr;
     const Elf64_Shdr *section_hdr;
+    const Elf64_Shdr *text_section_hdr;
+    const Elf64_Shdr *data_section_hdr;
+    const Elf64_Shdr *rodata_section_hdr;
     const uint8_t *text = NULL;
+    const uint8_t *data = NULL;
+    const uint8_t *rodata = NULL;
 
     // The ELF header's e_shoff member gives the byte offset from the beginning
     // of the file to the section header table.
@@ -187,27 +199,61 @@ void parse_obj(object *obj) {
     obj->strtab = (const char *)(base + section_hdr->sh_offset);
 
     // handle .text section
-    section_hdr = lookup_section_hdr_by_name(obj, ".text");
-    if (!section_hdr) {
+    text_section_hdr = lookup_section_hdr_by_name(obj, ".text");
+    if (!text_section_hdr) {
         fputs("Failed to find .text\n", stderr);
         exit(-1);
     }
-    text = (const uint8_t *)(base + section_hdr->sh_offset);
+    text = (const uint8_t *)(base + text_section_hdr->sh_offset);
 
-    obj->text = mmap(NULL, page_align(section_hdr->sh_size),
+    data_section_hdr = lookup_section_hdr_by_name(obj, ".data");
+    if (!data_section_hdr) {
+        fputs("Failed to find .data\n", stderr);
+        exit(-1);
+    }
+    data = (const uint8_t *)(base + data_section_hdr->sh_offset);
+
+    rodata_section_hdr = lookup_section_hdr_by_name(obj, ".rodata");
+    if (!rodata_section_hdr) {
+        fputs("Failed to find .rodata\n", stderr);
+        exit(-1);
+    }
+    rodata = (const uint8_t *)(base + rodata_section_hdr->sh_offset);
+
+    obj->text = mmap(NULL, page_align(text_section_hdr->sh_size) +
+                     page_align(data_section_hdr->sh_size) +
+                     page_align(rodata_section_hdr->sh_size),
                      PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (obj->text == MAP_FAILED) {
-        perror("Failed to allocate memory for .text");
+        perror("Failed to allocate memory");
         exit(errno);
     }
+
+    // .data will come right after .text
+    obj->data = obj->text + page_align(text_section_hdr->sh_size);
+    // .rodata will come after .data
+    obj->rodata = obj->data + page_align(data_section_hdr->sh_size);
+
     // copy the contents of .text section from the ELF file
-    memcpy(obj->text, text, section_hdr->sh_size);
+    memcpy(obj->text, text, text_section_hdr->sh_size);
+    // copy the contents of .data section from the ELF file
+    memcpy(obj->data, data, data_section_hdr->sh_size);
+    // copy the contents of .rodata section from the ELF file
+    memcpy(obj->rodata, rodata, rodata_section_hdr->sh_size);
 
     do_text_relocations(obj);
 
     // make the .text copy readonly and executable
     if (mprotect(obj->text, page_align(section_hdr->sh_size), PROT_READ | PROT_EXEC)) {
         perror("Failed to make .text executable");
+        exit(errno);
+    }
+
+    // we don't need to do anything with .data - it should remain read/write
+
+    // make the `.rodata` copy readonly
+    if (mprotect(obj->rodata, page_align(rodata_section_hdr->sh_size), PROT_READ)) {
+        perror("Failed to make .rodata readonly");
         exit(errno);
     }
 }
@@ -246,6 +292,9 @@ int main() {
     /* pointers to imported add5 and add10 functions */
     int (*add5)(int);
     int (*add10)(int);
+    const char *(*get_hello)(void);
+    int (*get_var)(void);
+    void (*set_var)(int num);
 
     obj = load_obj("./obj.o");
     parse_obj(&obj);
@@ -267,6 +316,36 @@ int main() {
 
     puts("Executing add10...");
     printf("add10(%d) = %d\n", 42, add10(42));
+
+    get_hello = lookup_function_by_name(&obj, "get_hello");
+    if (!get_hello) {
+        fputs("Failed to find get_hello function\n", stderr);
+        exit(ENOENT);
+    }
+
+    puts("Executing get_hello...");
+    printf("get_hello() = %s\n", get_hello());
+
+    get_var = lookup_function_by_name(&obj, "get_var");
+    if (!get_var) {
+        fputs("Failed to find get_var function\n", stderr);
+        exit(ENOENT);
+    }
+
+    puts("Executing get_var...");
+    printf("get_var() = %d\n", get_var());
+
+    set_var = lookup_function_by_name(&obj, "set_var");
+    if (!set_var) {
+        fputs("Failed to find set_var function\n", stderr);
+        exit(ENOENT);
+    }
+
+    puts("Executing set_var(42)...");
+    set_var(42);
+
+    puts("Executing get_var again...");
+    printf("get_var() = %d\n", get_var());
 
     return 0;
 }
