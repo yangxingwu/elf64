@@ -28,6 +28,23 @@ typedef union object_hdr {
     const uint8_t *base;
 } object_hdr;
 
+struct ext_jump {
+    // address to jump to
+    // 8 bytes for x64 arch
+    uint8_t *addr;
+
+    // unconditional x64 JMP instruction
+    // should always be {0xff, 0x25, 0xf2, 0xff, 0xff, 0xff}
+    // so it would jump to an address stored at addr above
+    //
+    // 1. 0xff and 0x25 is the encoding of the x64 jump instruction and
+    //    its modifier
+    // 2. the offset between `instr` and `addr` member is alwaysa -14 bytes (which
+    //    is 0xfffffff2 in hex)
+    // 3. 0xf2 0xff 0xff 0xff is the little-endian format of 0xfffffff2
+    uint8_t instr[6];
+};
+
 typedef struct object {
     // The ELF header's e_shoff member gives the byte offset from the beginning
     // of the file to the section header table. e_shnum holds the number of
@@ -93,6 +110,9 @@ typedef struct object {
 
     // .rodata section
     uint8_t *rodata;
+
+    // jump table
+    struct ext_jump *jumptable;
 } object;
 
 object load_obj(const char *obj_file_path);

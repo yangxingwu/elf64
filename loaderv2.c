@@ -109,6 +109,17 @@ static const Elf64_Shdr *lookup_section_hdr_by_name(object *obj, const char *nam
     return NULL;
 }
 
+static void *lookup_ext_function(const char *name)
+{
+    size_t name_len = strlen(name);
+ 
+    if (name_len == strlen("puts") && !strcmp(name, "puts"))
+        return my_puts;
+ 
+    fprintf(stderr, "No address for function %s\n", name);
+    exit(ENOENT);
+}
+
 static void do_text_relocations(object *obj)
 {
     /* we actually cheat here - the name .rela.text is a convention, but not a
@@ -136,8 +147,31 @@ static void do_text_relocations(object *obj)
 
         // symbol, with respect to which the relocation is performed
         sym = symtab + symtab_index;
-        // 找到 symbol 所属的 section 头部，进而根据头部找到对应 section 的地址
-        sym_address = get_section_runtime_base(obj, obj->section_hdr_table + sym->st_shndx) + sym->st_value;
+
+        // if this is an external symbol
+        if (sym->st_shndx == SHN_UNDEF) {
+            static int curr_jmp_idx = 0;
+            struct ext_jump *jump_entry = obj->jumptable + curr_jmp_idx;
+
+            // get external symbol/function address by name
+            jump_entry->addr = lookup_ext_function(obj->strtab + sym->st_name);
+
+            // x64 unconditional JMP with address stored at -14 bytes offset
+            // will use the address stored in addr above
+            jump_entry->instr[0] = 0xff;
+            jump_entry->instr[1] = 0x25;
+            jump_entry->instr[2] = 0xf2;
+            jump_entry->instr[3] = 0xff;
+            jump_entry->instr[4] = 0xff;
+            jump_entry->instr[5] = 0xff;
+
+            // resolve the relocation with respect to this unconditional JMP
+            sym_address = (uint8_t *)(&(jump_entry->instr));
+        } else {
+            // 找到 symbol 所属的 section 头部，进而根据头部找到对应 section 的地址
+            sym_address = get_section_runtime_base(obj, obj->section_hdr_table +
+                            sym->st_shndx) + sym->st_value;
+        }
 
         switch (rela_type)
         {
@@ -235,7 +269,8 @@ void parse_obj(object *obj) {
 
     obj->text = mmap(NULL, page_align(text_section_hdr->sh_size) +
                      page_align(data_section_hdr->sh_size) +
-                     page_align(rodata_section_hdr->sh_size),
+                     page_align(rodata_section_hdr->sh_size) +
+                     page_align(sizeof(struct ext_jump) * obj->num_external_rela_symbols),
                      PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (obj->text == MAP_FAILED) {
         perror("Failed to allocate memory");
@@ -246,6 +281,8 @@ void parse_obj(object *obj) {
     obj->data = obj->text + page_align(text_section_hdr->sh_size);
     // .rodata will come after .data
     obj->rodata = obj->data + page_align(data_section_hdr->sh_size);
+    // jumptable will come after .rodata
+    obj->jumptable = (struct ext_jump *)(obj->rodata + page_align(rodata_section_hdr->sh_size));
 
     // copy the contents of .text section from the ELF file
     memcpy(obj->text, text, text_section_hdr->sh_size);
@@ -267,6 +304,13 @@ void parse_obj(object *obj) {
     // make the `.rodata` copy readonly
     if (mprotect(obj->rodata, page_align(rodata_section_hdr->sh_size), PROT_READ)) {
         perror("Failed to make .rodata readonly");
+        exit(errno);
+    }
+
+    // make the jumptable readonly and executable
+    if (mprotect(obj->jumptable, page_align(sizeof(struct ext_jump) *
+            obj->num_external_rela_symbols), PROT_READ | PROT_EXEC)) {
+        perror("Failed to make the jumptable executable");
         exit(errno);
     }
 }
