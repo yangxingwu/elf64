@@ -23,3 +23,8 @@ int add10(int num) {
     num = add5(num);
     return add5(num);
 }
+
+void say_hello(void)
+{
+    puts("Hello, world!");
+}

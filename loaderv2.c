@@ -17,6 +17,9 @@ object load_obj(const char *obj_file_path) {
         .hdr = {
             .base = NULL,
         },
+        .rela_text = NULL,
+        .num_rela_symbols = 0,
+        .num_external_rela_symbols = 0,
         .section_hdr_table = NULL,
         .shstrtab = NULL,
         .symtab = NULL,
@@ -49,6 +52,13 @@ object load_obj(const char *obj_file_path) {
 out:
     close(fd);
     return obj;
+}
+
+// external dependencies for obj.o
+static int my_puts(const char *s)
+{
+    puts("my_puts executed");
+    return puts(s);
 }
 
 static uint8_t *get_section_runtime_base(const object *obj,
@@ -105,10 +115,9 @@ static void do_text_relocations(object *obj)
      * rule: to figure out which section should be patched by these relocations
      * we would need to examine the rela_text_section_hdr, but we skip it for simplicity
      */
-    const Elf64_Shdr *rela_text_section_hdr = NULL;
     const Elf64_Rela *relocation = NULL;
-    const Elf64_Rela *relocations = NULL;
-    int num_relocations = 0;
+    const Elf64_Rela *relocations = obj->rela_text;
+    int num_relocations = obj->num_rela_symbols;
     int rela_index;
     int rela_type;
     uint8_t *rela_offset;
@@ -116,17 +125,6 @@ static void do_text_relocations(object *obj)
     const Elf64_Sym *sym = NULL;
     int symtab_index;
     uint8_t *sym_address;
-
-    rela_text_section_hdr = lookup_section_hdr_by_name(obj, ".rela.text");
-    if (!rela_text_section_hdr) {
-        fputs("Failed to find .rela.text\n", stderr);
-        exit(ENOEXEC);
-    }
-
-    relocations = (const Elf64_Rela *)(obj->hdr.base +
-        rela_text_section_hdr->sh_offset);
-    num_relocations = rela_text_section_hdr->sh_size /
-        rela_text_section_hdr->sh_entsize;
 
     for (rela_index = 0; rela_index < num_relocations; rela_index++) {
         relocation = relocations + rela_index;
@@ -197,6 +195,21 @@ void parse_obj(object *obj) {
     }
     // get the .strtab section
     obj->strtab = (const char *)(base + section_hdr->sh_offset);
+
+    // get the .rela.text section header in the section header table
+    section_hdr = lookup_section_hdr_by_name(obj, ".rela.text");
+    if (!section_hdr) {
+        fputs("Failed to find .rela.text\n", stderr);
+        exit(-1);
+    }
+    // get the .rela.text section
+    obj->rela_text = (const Elf64_Rela *)(base + section_hdr->sh_offset);
+    obj->num_rela_symbols = section_hdr->sh_size / section_hdr->sh_entsize;
+    for (int i = 0; i < obj->num_rela_symbols; i++) {
+        int symbol_idx = ELF64_R_SYM((obj->rela_text + i)->r_info);
+        if ((obj->symtab + symbol_idx)->st_shndx == SHN_UNDEF)
+            obj->num_external_rela_symbols++;
+    }
 
     // handle .text section
     text_section_hdr = lookup_section_hdr_by_name(obj, ".text");
@@ -295,6 +308,7 @@ int main() {
     const char *(*get_hello)(void);
     int (*get_var)(void);
     void (*set_var)(int num);
+    void (*say_hello)(void);
 
     obj = load_obj("./obj.o");
     parse_obj(&obj);
@@ -346,6 +360,15 @@ int main() {
 
     puts("Executing get_var again...");
     printf("get_var() = %d\n", get_var());
+
+    say_hello = lookup_function_by_name(&obj, "say_hello");
+    if (!say_hello) {
+        fputs("Failed to find say_hello function\n", stderr);
+        exit(ENOENT);
+    }
+
+    puts("Executing say_hello...");
+    say_hello();
 
     return 0;
 }

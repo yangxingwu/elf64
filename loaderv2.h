@@ -75,6 +75,16 @@ typedef struct object {
     // null termination for all strings.
     const char *strtab;
 
+    // Relocation is the process of connecting symbolic references with
+    // symbolic definitions. Relocatable files must have information
+    // that describes how to modify their section contents, thus
+    // allowing executable and shared object files to hold the right
+    // information for a process's program image.  Relocation entries
+    // are these data.
+    const Elf64_Rela *rela_text;
+    int num_rela_symbols;
+    int num_external_rela_symbols;
+
     // .text section
     uint8_t *text;
 
